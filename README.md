@@ -13,8 +13,8 @@ and Dex1_1 grippers carrying RealSense D405 cameras. Meters, Z-up.
     merged into the single robot articulation.
   - Everything is one articulation (root `root_joint`). Meshes are inline except:
     - the head, which references `./twist2_head.usda`;
-    - the hand geometry (`<side>_hand_*/visuals`, `collisions`, `<side>_D405`), which references
-      `../dex1_d405_hand/dex1_1_d405_{right,left}.usd`.
+    - the hand geometry (`<side>_hand_*/visuals`, `collisions`, `<side>_D405`) and its materials
+      (`<side>_hand_Looks`), which reference `../dex1_d405_hand/dex1_1_d405_{right,left}.usd`.
     Keep the folders together. Hand link prims, joints, drives and masses stay in the G1 file,
     so prim paths and joint names are the same as before.
 - `twist2_head.usda` — the head, referenced by the G1 (also opens standalone).
@@ -24,7 +24,8 @@ and Dex1_1 grippers carrying RealSense D405 cameras. Meters, Z-up.
 Gears `gear_yaw` / `gear_pitch` couple the rest.
 
 **D405 cameras:** `<root>/<side>_hand_base_link/<side>_D405`, and per-hand optical frames.
-Intrinsics: 1280×720, HFOV 87° / VFOV 58°.
+Intrinsics: our unit's calibrated colour stream, 848×480, fx 429.97 / fy 429.45, cx 413.72 / cy 243.44 px,
+plumb_bob distortion (HFOV 89.2° / VFOV 58.4°), authored as Isaac Sim's OpenCV pinhole lens model on the camera prims.
 
 ### `dex1_d405_hand/` — Dex1_1 hand with the D405 mount (single source for the hand)
 - `dex1_1_d405.urdf` (+ `meshes/`) — the source of truth for ROS, planners and the USDs below.
