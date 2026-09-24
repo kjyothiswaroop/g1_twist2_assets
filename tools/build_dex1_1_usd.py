@@ -16,6 +16,9 @@ Layout (matches the hand links of g1_assembled/, so the G1 can reference link co
     /joints                      <p>Joint1_1, <p>Joint2_1 (prismatic), fixed joints, root_joint
 Colliders are built from the visual meshes: convex decomposition for the base, mount and finger
 bodies (a single hull of Link*_2 would cover the pad face), convex hulls for the rest.
+Everything is black like the real gripper; the pads get a matte rubber OmniPBR material with the
+1 mm diamond-knurl normal map (textures/pad_knurl_normal.png, made by tools/make_pad_knurl_texture.py)
+on planar UVs over the gripping face.
 
 Requires: usd-core, trimesh, numpy, scipy.   Usage: python tools/build_dex1_1_usd.py
 """
@@ -26,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 import trimesh
-from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, Vt
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade, Vt
 from scipy.spatial.transform import Rotation as R
 
 HAND_DIR = Path(__file__).resolve().parent.parent / "dex1_d405_hand"
@@ -34,11 +37,30 @@ HAND_DIR = Path(__file__).resolve().parent.parent / "dex1_d405_hand"
 MERGED = {"d405_mount": "d405_mount", "d405_camera": "d405_body"}
 OPTICAL_FRAME = "d405_optical_frame"
 DECOMPOSE = {"base_link", "d405_mount", "Link1_2", "Link2_2"}
-BODY_COLOR, PAD_COLOR = (0.015, 0.015, 0.015), (0.965, 0.95, 0.95)  # G1 material_CAD1EE / 4C4C4C
+# Materials (OmniPBR), set from a real D405 frame of the gripper: pads and fingers both render at
+# ~0.2x the (sRGB) pixel value of a light-grey floor = ~0.04x in linear light, so ~0.018 albedo for a
+# ~0.45 floor; only soft edge highlights (no metal reflections).
+# The G1's hand materials use the same values: material_CAD1EE (body) and material_4C4C4C (pads).
+BODY_COLOR = PAD_COLOR = (0.018, 0.018, 0.018)   # black anodised aluminium / black rubber (linear albedo)
+BODY_METALLIC, BODY_ROUGHNESS = 0.0, 0.65      # anodising reads as a satin dielectric, not bare metal
 PAD_LINKS = {"Link1_3", "Link2_3"}
+# Pads: matte black rubber with a 1 mm diamond knurl (normal map from tools/make_pad_knurl_texture.py).
+# The pad UVs are the gripping-face plane (link y, z) divided by one texture tile.
+PAD_NORMAL_MAP = "./textures/pad_knurl_normal.png"   # relative to dex1_d405_hand/
+PAD_TILE_M = 0.001 * math.sqrt(2)
+PAD_ROUGHNESS = 0.8
 DRIVE = dict(stiffness=100.0, damping=1.0, max_force=200.0)  # same gains as the G1 hand joints
-# D405 intrinsics as authored on the G1 cameras (HFOV 87 deg, 1280x720).
-CAMERA = dict(focal_length=1.88, horizontal_aperture=3.5681069, vertical_aperture=2.0842021, clip=(0.02, 10.0))
+# D405 colour stream calibration of our unit (realsense2_camera color/camera_info, 848x480, plumb_bob):
+# HFOV 89.2 deg, VFOV 58.4 deg. Written as Isaac Sim's OpenCV pinhole lens model (exact cx, cy and
+# distortion); focal length / apertures give the same fx, fy for tools that only read those.
+CAMERA = dict(
+    width=848, height=480,
+    fx=429.968017578125, fy=429.45074462890625, cx=413.7232666015625, cy=243.4409637451172,
+    k1=-0.055683065205812454, k2=0.05787091329693794, p1=0.0005697416490875185, p2=0.00048715356388129294,
+    k3=-0.018814567476511,
+    focal_length=1.88,  # mm; apertures follow from fx, fy
+    clip=(0.02, 10.0),
+)
 
 
 def T(xyz, rpy):
@@ -101,9 +123,30 @@ def build(links, joints, mesh_root, out, prefix, cam_name, root_name, mimic):
     rp.AddAppliedSchema("PhysxArticulationAPI")
     rp.CreateAttribute("physxArticulation:enabledSelfCollisions", Sdf.ValueTypeNames.Bool).Set(False)
 
+    def omnipbr(name, color, roughness, metallic=0.0, normal_map=None):
+        """OmniPBR (Isaac Sim's standard MDL material), like the G1's hand materials."""
+        material = UsdShade.Material.Define(stage, f"{root}/Looks/{name}")
+        shader = UsdShade.Shader.Define(stage, f"{root}/Looks/{name}/Shader")
+        shader.SetSourceAsset(Sdf.AssetPath("OmniPBR.mdl"), "mdl")
+        shader.SetSourceAssetSubIdentifier("OmniPBR", "mdl")
+        shader.CreateInput("diffuse_color_constant", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*color))
+        shader.CreateInput("reflection_roughness_constant", Sdf.ValueTypeNames.Float).Set(roughness)
+        shader.CreateInput("metallic_constant", Sdf.ValueTypeNames.Float).Set(metallic)
+        if normal_map:
+            tex = shader.CreateInput("normalmap_texture", Sdf.ValueTypeNames.Asset)
+            tex.Set(Sdf.AssetPath(normal_map))
+            tex.GetAttr().SetColorSpace("raw")
+        for output in (material.CreateSurfaceOutput("mdl"), material.CreateDisplacementOutput("mdl"),
+                       material.CreateVolumeOutput("mdl")):
+            output.ConnectToSource(shader.ConnectableAPI(), "out")
+        return material
+
+    body_material = omnipbr("body_anodised", BODY_COLOR, BODY_ROUGHNESS, BODY_METALLIC)
+    pad_material = omnipbr("pad_rubber", PAD_COLOR, PAD_ROUGHNESS, normal_map=PAD_NORMAL_MAP)
+
     cache = {}
 
-    def mesh(path, filename, M=None, color=BODY_COLOR, collider=None):
+    def mesh(path, filename, M=None, color=BODY_COLOR, collider=None, pad=False):
         f = mesh_root / filename
         tm = cache.setdefault(f, trimesh.load(f))
         m = UsdGeom.Mesh.Define(stage, path)
@@ -120,6 +163,10 @@ def build(links, joints, mesh_root, out, prefix, cam_name, root_name, mimic):
             UsdPhysics.MeshCollisionAPI.Apply(m.GetPrim()).CreateApproximationAttr(collider)
         else:
             m.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(*color)]))
+            if pad:  # planar UVs on the gripping face (link y-z plane), one knurl tile per PAD_TILE_M
+                st = UsdGeom.PrimvarsAPI(m).CreatePrimvar("st", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.vertex)
+                st.Set(Vt.Vec2fArray.FromNumpy((tm.vertices[:, 1:3] / PAD_TILE_M).astype(np.float32)))
+            UsdShade.MaterialBindingAPI.Apply(m.GetPrim()).Bind(pad_material if pad else body_material)
 
     bodies = [l for l in links if l not in MERGED and l != OPTICAL_FRAME]
     for link in bodies:
@@ -131,7 +178,7 @@ def build(links, joints, mesh_root, out, prefix, cam_name, root_name, mimic):
         UsdPhysics.MassAPI.Apply(x.GetPrim()).CreateMassAttr(mass)
         color = PAD_COLOR if link in PAD_LINKS else BODY_COLOR
         approx = "convexDecomposition" if link in DECOMPOSE else "convexHull"
-        mesh(f"{path}/visuals/{link}/mesh", links[link]["visual"], color=color)
+        mesh(f"{path}/visuals/{link}/mesh", links[link]["visual"], color=color, pad=link in PAD_LINKS)
         mesh(f"{path}/collisions/{link}/mesh", links[link]["visual"], collider=approx)
     base = f"{root}/{prefix}base_link"
     for link, name in MERGED.items():
@@ -142,10 +189,17 @@ def build(links, joints, mesh_root, out, prefix, cam_name, root_name, mimic):
     # D405: ROS optical frame (+Z forward, +Y down) -> USD camera (looks down -Z, +Y up)
     cam = UsdGeom.Camera.Define(stage, f"{base}/{cam_name}")
     cam.AddTransformOp().Set(matrix(pose[OPTICAL_FRAME] @ np.diag([1, -1, -1, 1])))
-    cam.CreateFocalLengthAttr(CAMERA["focal_length"])
-    cam.CreateHorizontalApertureAttr(CAMERA["horizontal_aperture"])
-    cam.CreateVerticalApertureAttr(CAMERA["vertical_aperture"])
-    cam.CreateClippingRangeAttr(Gf.Vec2f(*CAMERA["clip"]))
+    c = CAMERA
+    cam.CreateFocalLengthAttr(c["focal_length"])
+    cam.CreateHorizontalApertureAttr(c["width"] * c["focal_length"] / c["fx"])
+    cam.CreateVerticalApertureAttr(c["height"] * c["focal_length"] / c["fy"])
+    cam.CreateClippingRangeAttr(Gf.Vec2f(*c["clip"]))
+    lens = cam.GetPrim()
+    lens.AddAppliedSchema("OmniLensDistortionOpenCvPinholeAPI")
+    lens.CreateAttribute("omni:lensdistortion:model", Sdf.ValueTypeNames.Token).Set("opencvPinhole")
+    lens.CreateAttribute("omni:lensdistortion:opencvPinhole:imageSize", Sdf.ValueTypeNames.Int2).Set(Gf.Vec2i(c["width"], c["height"]))
+    for key in ("cx", "cy", "fx", "fy", "k1", "k2", "p1", "p2", "k3"):
+        lens.CreateAttribute(f"omni:lensdistortion:opencvPinhole:{key}", Sdf.ValueTypeNames.Float).Set(c[key])
 
     fj = UsdPhysics.FixedJoint.Define(stage, f"{root}/joints/root_joint")  # fixed base, like the G1 hands' wrist
     fj.CreateBody1Rel().SetTargets([base])

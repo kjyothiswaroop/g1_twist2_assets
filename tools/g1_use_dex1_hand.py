@@ -3,7 +3,8 @@
 
 For each <side>_hand_<link> body in the G1 USD this replaces the inline `visuals`, `collisions`
 (and on the base the `<side>_D405` camera) with references to the same prims in the per-side
-hand file, then re-binds the G1's own materials to the visual meshes. Link prims, joints,
+hand file. The hand file's materials are referenced as <root>/<side>_hand_Looks and bound to the
+visual meshes, so geometry, camera and look all come from the hand builder. Link prims, joints,
 drives and masses of the G1 are left as they are, so prim paths, joint names and control
 behaviour do not change. Re-running is safe.
 
@@ -18,7 +19,7 @@ from pxr import Sdf, Usd, UsdGeom
 REPO = Path(__file__).resolve().parent.parent
 ROOT = "/g1_29dof_with_hand_rev_1_0"
 LINKS = ["base_link", "Link1_1", "Link1_2", "Link1_3", "Link2_1", "Link2_2", "Link2_3"]
-BODY_MATERIAL, PAD_MATERIAL = f"{ROOT}/Looks/material_CAD1EE", f"{ROOT}/Looks/material_4C4C4C"
+BODY_MATERIAL, PAD_MATERIAL = "body_anodised", "pad_rubber"  # materials in the hand file's Looks
 PAD_LINKS = {"Link1_3", "Link2_3"}
 
 
@@ -42,6 +43,11 @@ def main():
                     del body.nameChildren[name]
                 spec = Sdf.PrimSpec(body, name, Sdf.SpecifierDef, "Camera" if name.endswith("D405") else "Xform")
                 spec.referenceList.Prepend(Sdf.Reference(str(asset), f"{hand_root}/{side}_hand_{link}/{name}"))
+        looks = f"{ROOT}/{side}_hand_Looks"
+        if layer.GetPrimAtPath(looks):
+            del layer.GetPrimAtPath(ROOT).nameChildren[f"{side}_hand_Looks"]
+        spec = Sdf.PrimSpec(layer.GetPrimAtPath(ROOT), f"{side}_hand_Looks", Sdf.SpecifierDef, "Scope")
+        spec.referenceList.Prepend(Sdf.Reference(str(asset), f"{hand_root}/Looks"))
         # Material overrides need the composed prims, so they are authored in a second pass below.
 
     layer.Save()
@@ -49,7 +55,7 @@ def main():
     for side in ("right", "left"):
         for link in LINKS:
             vis = stage.GetPrimAtPath(f"{ROOT}/{side}_hand_{link}/visuals")
-            material = PAD_MATERIAL if link in PAD_LINKS else BODY_MATERIAL
+            material = f"{ROOT}/{side}_hand_Looks/" + (PAD_MATERIAL if link in PAD_LINKS else BODY_MATERIAL)
             for p in Usd.PrimRange(vis):
                 if p.IsA(UsdGeom.Mesh):
                     over = Sdf.CreatePrimInLayer(layer, p.GetPath())
