@@ -6,14 +6,13 @@ Writes three files next to the URDF, all with identical geometry, frames and col
   dex1_1_d405_right.usd  names prefixed "right_hand_", camera "right_D405"  (referenced by the G1)
   dex1_1_d405_left.usd   names prefixed "left_hand_",  camera "left_D405"   (referenced by the G1)
 
-Layout (matches the hand links of g1_assembled/, so the G1 can reference link contents 1:1):
+Layout: one rigid body per URDF link, as in the URDF and the G1 (g1_assembled/ references link contents 1:1):
   /<root>                        ArticulationRoot, self-collision off, fixed to the world
-    /<p>base_link                rigid body; the D405 mount and camera are merged in as geometry
-      visuals/{base_link/mesh, d405_mount, d405_body}
-      collisions/{base_link/mesh, d405_mount, d405_body}
-      <cam>                      Camera at the URDF d405_optical_frame
-    /<p>Link1_1 ... /<p>Link2_3  rigid bodies with visuals/<Link>/mesh and collisions/<Link>/mesh
-    /joints                      <p>Joint1_1, <p>Joint2_1 (prismatic), fixed joints, root_joint
+    /<p>base_link, /<p>d405_mount, /<p>d405_camera, /<p>Link1_1 ... /<p>Link2_3
+                                 rigid bodies with visuals/<link>/mesh and collisions/<link>/mesh
+      /<p>d405_camera/<cam>      Camera at the URDF d405_optical_frame
+    /joints                      <p>Joint1_1, <p>Joint2_1 (prismatic), fixed joints (incl. base_to_d405_mount,
+                                 d405_mount_to_camera), root_joint
 Colliders are built from the visual meshes: convex decomposition for the base, mount and finger
 bodies (a single hull of Link*_2 would cover the pad face), convex hulls for the rest.
 Everything is black like the real gripper; the pads get a matte rubber OmniPBR material with the
@@ -33,14 +32,12 @@ from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade, Vt
 from scipy.spatial.transform import Rotation as R
 
 HAND_DIR = Path(__file__).resolve().parent.parent / "dex1_d405_hand"
-# Fixed children of base_link merged into it as geometry, with the G1's prim names.
-MERGED = {"d405_mount": "d405_mount", "d405_camera": "d405_body"}
-OPTICAL_FRAME = "d405_optical_frame"
+OPTICAL_FRAME = "d405_optical_frame"  # frame only (no geometry): the camera prim goes under d405_camera
 DECOMPOSE = {"base_link", "d405_mount", "Link1_2", "Link2_2"}
 # Materials (OmniPBR), set from a real D405 frame of the gripper: pads and fingers both render at
 # ~0.2x the (sRGB) pixel value of a light-grey floor = ~0.04x in linear light, so ~0.018 albedo for a
 # ~0.45 floor; only soft edge highlights (no metal reflections).
-# The G1's hand materials use the same values: material_CAD1EE (body) and material_4C4C4C (pads).
+# The G1 binds its hand meshes to these materials (referenced as <side>_hand_Looks).
 BODY_COLOR = PAD_COLOR = (0.018, 0.018, 0.018)   # black anodised aluminium / black rubber (linear albedo)
 BODY_METALLIC, BODY_ROUGHNESS = 0.0, 0.65      # anodising reads as a satin dielectric, not bare metal
 PAD_LINKS = {"Link1_3", "Link2_3"}
@@ -168,27 +165,22 @@ def build(links, joints, mesh_root, out, prefix, cam_name, root_name, mimic):
                 st.Set(Vt.Vec2fArray.FromNumpy((tm.vertices[:, 1:3] / PAD_TILE_M).astype(np.float32)))
             UsdShade.MaterialBindingAPI.Apply(m.GetPrim()).Bind(pad_material if pad else body_material)
 
-    bodies = [l for l in links if l not in MERGED and l != OPTICAL_FRAME]
+    bodies = [l for l in links if l != OPTICAL_FRAME]
     for link in bodies:
         path = f"{root}/{prefix}{link}"
         x = UsdGeom.Xform.Define(stage, path)
         x.AddTransformOp().Set(matrix(pose[link]))
         UsdPhysics.RigidBodyAPI.Apply(x.GetPrim())
-        mass = links[link]["mass"] + (sum(links[m]["mass"] for m in MERGED) if link == "base_link" else 0.0)
-        UsdPhysics.MassAPI.Apply(x.GetPrim()).CreateMassAttr(mass)
+        UsdPhysics.MassAPI.Apply(x.GetPrim()).CreateMassAttr(links[link]["mass"])
         color = PAD_COLOR if link in PAD_LINKS else BODY_COLOR
         approx = "convexDecomposition" if link in DECOMPOSE else "convexHull"
         mesh(f"{path}/visuals/{link}/mesh", links[link]["visual"], color=color, pad=link in PAD_LINKS)
         mesh(f"{path}/collisions/{link}/mesh", links[link]["visual"], collider=approx)
     base = f"{root}/{prefix}base_link"
-    for link, name in MERGED.items():
-        approx = "convexDecomposition" if link in DECOMPOSE else "convexHull"
-        mesh(f"{base}/visuals/{name}", links[link]["visual"], M=pose[link])
-        mesh(f"{base}/collisions/{name}", links[link]["visual"], M=pose[link], collider=approx)
 
-    # D405: ROS optical frame (+Z forward, +Y down) -> USD camera (looks down -Z, +Y up)
-    cam = UsdGeom.Camera.Define(stage, f"{base}/{cam_name}")
-    cam.AddTransformOp().Set(matrix(pose[OPTICAL_FRAME] @ np.diag([1, -1, -1, 1])))
+    # D405: ROS optical frame (+Z forward, +Y down) -> USD camera (looks down -Z, +Y up), on the d405_camera link
+    cam = UsdGeom.Camera.Define(stage, f"{root}/{prefix}d405_camera/{cam_name}")
+    cam.AddTransformOp().Set(matrix(np.linalg.inv(pose["d405_camera"]) @ pose[OPTICAL_FRAME] @ np.diag([1, -1, -1, 1])))
     c = CAMERA
     cam.CreateFocalLengthAttr(c["focal_length"])
     cam.CreateHorizontalApertureAttr(c["width"] * c["focal_length"] / c["fx"])
@@ -204,7 +196,7 @@ def build(links, joints, mesh_root, out, prefix, cam_name, root_name, mimic):
     fj = UsdPhysics.FixedJoint.Define(stage, f"{root}/joints/root_joint")  # fixed base, like the G1 hands' wrist
     fj.CreateBody1Rel().SetTargets([base])
     for name, j in joints.items():
-        if j["child"] in MERGED or j["child"] == OPTICAL_FRAME:
+        if j["child"] == OPTICAL_FRAME:
             continue
         path = f"{root}/joints/{prefix}{name}"
         prismatic = j["type"] == "prismatic"
