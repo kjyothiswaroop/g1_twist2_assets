@@ -38,14 +38,21 @@ plumb_bob distortion (HFOV 89.2° / VFOV 58.4°), authored as Isaac Sim's OpenCV
   `base_link` as geometry. Colliders come from the visual meshes: convex decomposition for the base,
   mount and finger bodies (`Link*_2`), convex hulls for the rest.
 - `dex1_1_d405_spheres.yml` — collision spheres for cuRobo/BODex, per URDF link in link frames
-  (150 spheres; sphere 0 of `Link1_3`/`Link2_3` is the pad-face contact point).
+  (152 spheres; sphere 0 of `Link1_3`/`Link2_3` is the pad-face contact point).
 - Built from the official `Dex1_1_Realsense_D405_Camera_Mount_M5010` mount.
 
 ### `tools/` — regenerate the hand assets (needs `usd-core trimesh numpy scipy pyyaml`)
 - `build_dex1_1_usd.py` — URDF → the three hand USDs above.
 - `g1_use_dex1_hand.py` — point the G1's hand geometry at the per-side hand USDs (re-runnable).
-- `usd_spheres_to_yaml.py` — sphere prims placed under each link of a hand USD (e.g. edited in
-  Isaac Sim) → `dex1_1_d405_spheres.yml`.
+- `yaml_spheres_to_usd.py` — `dex1_1_d405_spheres.yml` → `dex1_d405_hand/dex1_1_d405_spheres_edit.usd`
+  (the hand plus its spheres, one `spheres_<link>` group per link) for editing in Isaac Sim.
+- `usd_spheres_to_yaml.py` — the edited USD → `dex1_1_d405_spheres.yml`.
+- `make_pad_knurl_texture.py` — the pad knurl normal map (`dex1_d405_hand/textures/`).
+
+Editing spheres: `python tools/yaml_spheres_to_usd.py`, edit and save the USD in Isaac Sim, then
+`python tools/usd_spheres_to_yaml.py dex1_d405_hand/dex1_1_d405_spheres_edit.usd dex1_d405_hand/dex1_1_d405_spheres.yml`.
+The hand USDs themselves are generated: change the URDF, meshes or `build_dex1_1_usd.py` and rebuild,
+rather than editing them in Isaac Sim.
 
 After editing the URDF: run `build_dex1_1_usd.py`; the G1 picks the change up through its references.
 
